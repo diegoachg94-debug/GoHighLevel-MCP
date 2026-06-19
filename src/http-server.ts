@@ -131,6 +131,18 @@ class GHLMCPHttpServer {
       console.log(`[HTTP] ${req.method} ${req.path} - ${new Date().toISOString()}`);
       next();
     });
+
+    // Seguridad: exige token (MCP_AUTH_TOKEN) salvo /health y preflight CORS.
+    this.app.use((req, res, next) => {
+      if (req.method === 'OPTIONS' || req.path === '/health') return next();
+      const required = process.env.MCP_AUTH_TOKEN;
+      if (!required) return next();
+      const header = req.headers.authorization || '';
+      const bearer = header.startsWith('Bearer ') ? header.slice(7) : '';
+      const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
+      if (bearer === required || queryToken === required) return next();
+      res.status(401).json({ error: 'Unauthorized' });
+    });
   }
 
   /**
