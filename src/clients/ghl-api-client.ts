@@ -3048,10 +3048,17 @@ export class GHLApiClient {
   async getSocialAccounts(): Promise<GHLApiResponse<GHLGetAccountsResponse>> {
     try {
       const locationId = this.config.locationId;
-      const response: AxiosResponse<GHLGetAccountsResponse> = await this.axiosInstance.get(
-        `/social-media-posting/${locationId}/accounts`
+      const response: AxiosResponse<
+        GHLGetAccountsResponse | { results: GHLGetAccountsResponse }
+      > = await this.axiosInstance.get(
+        `/social-media-posting/${locationId}/accounts`,
+        { headers: { Version: 'v3' } }
       );
-      return this.wrapResponse(response.data);
+
+      // Social Planner v3 wraps the requested payload in `results`.
+      // Keep compatibility with the older unwrapped response shape too.
+      const data = 'results' in response.data ? response.data.results : response.data;
+      return this.wrapResponse(data);
     } catch (error) {
       throw error;
     }
@@ -6825,4 +6832,4 @@ export class GHLApiClient {
       throw error;
     }
   }
-} 
+}
