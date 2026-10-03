@@ -7,6 +7,7 @@ import express from 'express';
 import cors from 'cors';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { 
   CallToolRequestSchema,
   ErrorCode,
@@ -177,9 +178,9 @@ class GHLMCPHttpServer {
   /**
    * Setup MCP request handlers
    */
-  private setupMCPHandlers(): void {
+  private setupMCPHandlers(server: Server = this.server): void {
     // Handle list tools requests
-    this.server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
       console.log('[GHL MCP HTTP] Listing available tools...');
       
       try {
@@ -236,7 +237,7 @@ class GHLMCPHttpServer {
     });
 
     // Handle tool execution requests
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args } = request.params;
       
       console.log(`[GHL MCP HTTP] Executing tool: ${name}`);
@@ -305,6 +306,28 @@ class GHLMCPHttpServer {
   }
 
   /**
+   * Create an isolated MCP server for one stateless Streamable HTTP request.
+   * Codex uses this transport, while the legacy SSE routes remain available
+   * for older clients during the migration.
+   */
+  private createConfiguredMCPServer(): Server {
+    const server = new Server(
+      {
+        name: 'ghl-mcp-server',
+        version: '1.0.0',
+      },
+      {
+        capabilities: {
+          tools: {},
+        },
+      }
+    );
+
+    this.setupMCPHandlers(server);
+    return server;
+  }
+
+  /**
    * Setup HTTP routes
    */
   private setupRoutes(): void {
@@ -361,6 +384,51 @@ class GHLMCPHttpServer {
         res.status(500).json({ error: 'Failed to list tools' });
       }
     });
+
+    // Modern Streamable HTTP endpoint used by Codex.
+    // Stateless mode creates a fresh protocol server per request and avoids
+    // cross-client session state while preserving all existing tools.
+    this.app.post('/mcp', async (req, res) => {
+      const server = this.createConfiguredMCPServer();
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+
+      try {
+        await server.connect(transport);
+        await transport.handleRequest(req, res, req.body);
+        res.on('close', () => {
+          void transport.close();
+          void server.close();
+        });
+      } catch (error) {
+        console.error('[GHL MCP HTTP] Streamable HTTP error:', error);
+        if (!res.headersSent) {
+          res.status(500).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32603,
+              message: 'Internal server error',
+            },
+            id: null,
+          });
+        }
+      }
+    });
+
+    const rejectUnsupportedMCPMethod = (_req: express.Request, res: express.Response) => {
+      res.status(405).json({
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'Method not allowed',
+        },
+        id: null,
+      });
+    };
+
+    this.app.get('/mcp', rejectUnsupportedMCPMethod);
+    this.app.delete('/mcp', rejectUnsupportedMCPMethod);
 
     // SSE endpoint for ChatGPT MCP connection
         const transports: Record<string, SSEServerTransport> = {};
